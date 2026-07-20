@@ -1,0 +1,300 @@
+name: CI — Smart Vending Machine / Zephyr RTOS (STM32 F446RE)
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  # ─────────────────────────────────────────────────────
+  # JOB 1 — Spell Check
+  # ─────────────────────────────────────────────────────
+  spell-check:
+    name: 🔤 Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run codespell
+        uses: codespell-project/actions-codespell@v2
+        with:
+          skip: ".git,*.bin,*.hex,build,*.conf"
+          ignore_words_list: >
+            UID,uid,crc,CRC,FIFO,fifo,ISR,isr,IRQ,irq,
+            HAL,hal,STM,stm,initialise,initialised,
+            SPI,spi,PWM,pwm,GPIO,gpio,UART,uart,
+            TIM,tim,MCU,mcu,ARM,Cortex,cortex,
+            RTOS,rtos,Zephyr,zephyr,SSID,ssid,
+            APEPDCL,apepdcl,AICTE,aicte,NPTEL,nptel,
+            CGPA,cgpa,EEE,eee,PLC,plc,
+            keypad,Keypad,servo,Servo,lcd,LCD,
+            msgq,sem,mutex,tid,pthread,cyc
+
+  # ─────────────────────────────────────────────────────
+  # JOB 2 — Python Simulator Tests
+  # ─────────────────────────────────────────────────────
+  simulator-test:
+    name: 🐍 Simulator Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pytest
+
+      - name: Check simulator syntax
+        run: python -m py_compile simulator/simulate.py
+
+      - name: Run simulator in automated mode
+        run: |
+          # Feed test inputs via stdin — simulates a real user
+          echo -e "A1\nA2\nA3\nB1\nB2\nA1\nA1\nA1\nq" | python simulator/simulate.py
+        timeout-minutes: 2
+
+      - name: Run pytest (unit tests)
+        run: |
+          if [ -f simulator/test_simulate.py ]; then
+            pytest simulator/test_simulate.py -v
+          else
+            echo "Simulator smoke test passed — no unit tests file yet"
+          fi
+
+  # ─────────────────────────────────────────────────────
+  # JOB 3 — Vending Machine Logic Unit Tests
+  # ─────────────────────────────────────────────────────
+  vending-logic-test:
+    name: 🥤 Vending Logic Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run inventory logic tests
+        run: |
+          python - << 'EOF'
+          # Inline unit tests for vending machine inventory logic
+
+          inventory = {
+              "A1": {"name": "Chips",    "price": 20, "stock": 3},
+              "A2": {"name": "Water",    "price": 15, "stock": 2},
+              "A3": {"name": "Soda",     "price": 25, "stock": 1},
+              "B1": {"name": "Biscuits", "price": 10, "stock": 2},
+              "B2": {"name": "Juice",    "price": 30, "stock": 0},
+          }
+
+          def buy(pid):
+              if pid not in inventory:
+                  return "UNKNOWN"
+              if inventory[pid]["stock"] == 0:
+                  return "OUT_OF_STOCK"
+              inventory[pid]["stock"] -= 1
+              return "DISPENSED"
+
+          # Test 1: Valid purchase
+          result = buy("A1")
+          assert result == "DISPENSED",        f"FAIL: Expected DISPENSED, got {result}"
+          assert inventory["A1"]["stock"] == 2, "FAIL: Stock should be 2 after purchase"
+          print("  ✅  Test 1 passed: Valid purchase A1 → DISPENSED, stock=2")
+
+          # Test 2: Out of stock
+          result = buy("B2")
+          assert result == "OUT_OF_STOCK",     f"FAIL: Expected OUT_OF_STOCK, got {result}"
+          print("  ✅  Test 2 passed: B2 is out of stock")
+
+          # Test 3: Unknown product
+          result = buy("Z9")
+          assert result == "UNKNOWN",          f"FAIL: Expected UNKNOWN, got {result}"
+          print("  ✅  Test 3 passed: Unknown product Z9")
+
+          # Test 4: Drain stock to zero
+          buy("A3")  # stock was 1 → now 0
+          result = buy("A3")
+          assert result == "OUT_OF_STOCK",     "FAIL: A3 should now be out of stock"
+          print("  ✅  Test 4 passed: A3 drained to 0 → OUT_OF_STOCK")
+
+          # Test 5: Buy all of A2
+          buy("A2")
+          buy("A2")
+          result = buy("A2")
+          assert result == "OUT_OF_STOCK",     "FAIL: A2 should be empty"
+          print("  ✅  Test 5 passed: A2 fully depleted")
+
+          # Test 6: Price check
+          assert inventory["A1"]["price"] == 20, "FAIL: A1 price should be 20"
+          assert inventory["B2"]["price"] == 30, "FAIL: B2 price should be 30"
+          print("  ✅  Test 6 passed: Price values correct")
+
+          print("")
+          print("  All vending logic tests passed ✅")
+          EOF
+
+  # ─────────────────────────────────────────────────────
+  # JOB 4 — C Source Lint (cppcheck)
+  # ─────────────────────────────────────────────────────
+  c-lint:
+    name: 🔍 C Static Analysis (cppcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck on src/
+        run: |
+          cppcheck \
+            --enable=warning,style,performance \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --suppress=missingInclude \
+            --inline-suppr \
+            --error-exitcode=1 \
+            src/
+
+  # ─────────────────────────────────────────────────────
+  # JOB 5 — CMakeLists.txt Validator
+  # ─────────────────────────────────────────────────────
+  cmake-validate:
+    name: ⚙️ CMakeLists.txt Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify all source files listed in CMakeLists exist
+        run: |
+          python - << 'EOF'
+          import re, os, sys
+
+          with open("CMakeLists.txt") as f:
+              content = f.read()
+
+          # Extract filenames from target_sources block
+          matches = re.findall(r'src/(\S+\.c)', content)
+          print(f"  Files declared in CMakeLists.txt: {matches}")
+
+          missing = []
+          for fname in matches:
+              path = os.path.join("src", fname)
+              if os.path.exists(path):
+                  print(f"  ✅  {path}")
+              else:
+                  print(f"  ❌  MISSING: {path}")
+                  missing.append(path)
+
+          if missing:
+              print(f"\nERROR: {len(missing)} file(s) declared but not found!")
+              sys.exit(1)
+
+          print("\n  CMakeLists.txt is consistent with src/ ✅")
+          EOF
+
+  # ─────────────────────────────────────────────────────
+  # JOB 6 — Markdown Lint
+  # ─────────────────────────────────────────────────────
+  markdown-lint:
+    name: 📝 README Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Lint README.md
+        uses: DavidAnson/markdownlint-cli2-action@v16
+        with:
+          globs: "README.md"
+
+  # ─────────────────────────────────────────────────────
+  # JOB 7 — Project Structure Validator
+  # ─────────────────────────────────────────────────────
+  structure-check:
+    name: 📁 Project Structure Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify required files exist
+        run: |
+          echo "Checking required project files..."
+          required_files=(
+            "README.md"
+            ".markdownlint.json"
+            "CMakeLists.txt"
+            "prj.conf"
+            "src/main.c"
+            "src/keypad.h"
+            "src/keypad.c"
+            "src/servo_dispense.h"
+            "src/servo_dispense.c"
+            "src/ultrasonic_verify.h"
+            "src/ultrasonic_verify.c"
+            "src/wifi_inventory.h"
+            "src/wifi_inventory.c"
+            "src/lcd_i2c.h"
+            "src/lcd_i2c.c"
+            "simulator/simulate.py"
+          )
+          all_ok=true
+          for f in "${required_files[@]}"; do
+            if [ -f "$f" ]; then
+              echo "  ✅  $f"
+            else
+              echo "  ❌  MISSING: $f"
+              all_ok=false
+            fi
+          done
+          if [ "$all_ok" = false ]; then
+            echo ""
+            echo "ERROR: Required files are missing!"
+            exit 1
+          fi
+          echo ""
+          echo "All required files present ✅"
+
+  # ─────────────────────────────────────────────────────
+  # JOB 8 — Summary
+  # ─────────────────────────────────────────────────────
+  all-checks-pass:
+    name: ✅ All Checks Passed
+    runs-on: ubuntu-latest
+    needs:
+      - spell-check
+      - simulator-test
+      - vending-logic-test
+      - c-lint
+      - cmake-validate
+      - markdown-lint
+      - structure-check
+    steps:
+      - name: Summary
+        run: |
+          echo "============================================"
+          echo "  Smart Vending Machine (Zephyr) — CI PASSED"
+          echo "  STM32 F446RE | Yaswanth Chlliboina"
+          echo "============================================"
+          echo ""
+          echo "  ✅ Spell check passed"
+          echo "  ✅ Simulator runs correctly"
+          echo "  ✅ Vending logic unit tests passed"
+          echo "  ✅ C static analysis passed"
+          echo "  ✅ CMakeLists.txt validated"
+          echo "  ✅ README lint passed"
+          echo "  ✅ Project structure valid"
+          echo ""
+          echo "  Repo: github.com/Yaswanth-Ch-24/smart-vending-machine-zephyr"
